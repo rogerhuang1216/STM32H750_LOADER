@@ -1,0 +1,309 @@
+
+HAL Driver中的各硬體IP的開關在 [stm32h7xx_hal_conf.h] 這個檔案中, 路徑 ->  C:\STM32\05_Fire\STM32H750_Challenger-V2\HELLO_FIRE_V2_EVK_LOADER_V4\User
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+//                                     設計思路
+//
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+[SRS] 在野火挑戰者 V2 開發板 建置 STM32H750XBH6 帶 RTOS/GUI 的平台, 含 bootloader (放在 H750 embedded 128K Flash) & application (放在 U7 - W25Q256JVEQ)
+
+思路: 目前 ST Cube 和 Keil 的 SPI Flash 燒錄方法都不好用, 計畫移植原來 YinYu 開發板上的 UART/Ethernet/另外新增 USB loader, 作為更新 embedded flash & SPI-Flash 的媒介
+
+整合原 YinYu 開發板的 bootloader (UART/ETHERNET) + USB bootloader 功能 + 99-FreeRTOS+emXGUI_5_7inch [閹割版] 當作整體架構
+
+
+Memory Map: 
+
+Embedded Flash
+
+*             0x0802 0000 +----------------------------------- + 
+*                                     |
+*     Sector  0			      |            128 Kbytes    (LOADER)                
+*                                     |                                                          
+*             0x0800 0000 +------------------------------------+
+
+
+QSPI Flash Memory Map
+
+*               0x9FFF FFFF +----------------------------------- + 
+*                                     |  
+*			 	      |             Kbytes     (APP)                
+*                                     |                                                          
+*               0x9001 0000 +------------------------------------+
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+######################################################################################################################################################
+
+20230615  
+
+HELLO_FIRE_V2_EVK_LOADER_V1: 直接 copy "99-FreeRTOS+emXGUI_5_7inch", 閹割 main 裡面的功能即可
+
+1. options for target 裡面的 C/C++ 要修改.   Preprocessor Symbols 內的 Define: APPLICATION_ADDRESS 由 0x900_0000 改為 0x0800_0000
+2. UART command line 已經復活
+
+
+
+######################################################################################################################################################
+
+20230630  
+
+based on V1
+
+* HELLO_FIRE_V2_EVK_LOADER_V2 - Complete: based on HELLO_FIRE_V2_EVK_LOADER_V1.
+
+  1. Add Do_SPI-Flash_TEST command, 目前SPI Flash 間接存取(indirect)可以用, 直接(direct)定址不行, 原因不明.
+
+* HELLO_FIRE_V2_EVK_LOADER_V2 - Simplified: base on "HELLO_FIRE_V2_EVK_LOADER_V2 - Complete", 拿掉不需要的 BSP/Fatfs/FreeRTOS/emxgui/tutorial/MPU/LwIP/Usb...etc.
+
+  1. 一樣, SPI Flash 間接存取(indirect)可以用, 直接(direct)定址不行, 原因不明.
+
+
+######################################################################################################################################################
+
+20230630  
+
+HELLO_FIRE_V2_EVK_LOADER_V3
+
+* 拿1-Book Example-H750XB-V_20221102\24-QSPI— RW SPI FLASH_W25Q256\Single_FLASH_RW_Direct 可以動的來加 command mode, 直接(direct)定址可以了, 原因不明 
+* HAL Driver中的各硬體IP的開關在 [stm32h7xx_hal_conf.h],  要確認是否有 enable 最好使用 Keil 一類的 compiler, 使用 sourceinsight 一類的工具因為還是能追溯到底層, 
+從顏色上無法一眼看出該模組是否已經被enable
+* SDRAM & SPI Flash 測試都可以動了
+
+
+#define HAL_MODULE_ENABLED
+#define HAL_ADC_MODULE_ENABLED
+#define HAL_CEC_MODULE_ENABLED
+#define HAL_COMP_MODULE_ENABLED
+#define HAL_CORTEX_MODULE_ENABLED
+#define HAL_CRC_MODULE_ENABLED
+.
+.
+.
+.
+######################################################################################################################################################
+
+20230706 
+
+HELLO_FIRE_V2_EVK_LOADER_V4
+
+1. 新增 Do_Flash      : 僅支援 wite double word (8個byte), 因為 STM32H750架構的關係, 一次需要寫入4個 double word 
+2. 新增 Do_Qspimemmap : 由 indirect 切換到 direct
+3. 新增 Do_SpiFlash   : erase chip/block, write byte/halfword/word, but "BSP_QSPI_Erase_Chip()" 沒功能, 原因不明
+
+
+
+######################################################################################################################################################
+
+20230728 
+
+HELLO_FIRE_V2_EVK_LOADER_V5 (based on HELLO_FIRE_V2_EVK_LOADER_V4)
+
+1. 新增 Do_Upgrade, xmodem receive 終於打通, 
+   [A] 原因是用 USART1_IRQHandler 裡使用的 HAL_UART_Receive(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size, uint32_t  
+       Timeout) 出問題, 改用回舊的 USART_ReceiveData(USART_TypeDef* USARTx) 已經正常[]
+   [B] Stack_Size     EQU     0x00010000
+       Heap_Size      EQU     0x00000800
+
+
+######################################################################################################################################################
+
+20230809 
+
+HELLO_FIRE_V2_EVK_LOADER_V7 (based on HELLO_FIRE_V2_EVK_LOADER_V6)
+
+1. 全部改成以 direct memory mode 的思維來設計
+2. BSP_QSPI_Erase_Block 一次只能 erase 0x1000 (4K) 而非 0x10000 (64K)
+3. 這個問題已經釐清了,  問題並不出在 direct / indirect memory mode 切換失敗, 而是  uint8_t BSP_QSPI_Erase_Block(uint32_t BlockAddress) 一次只能 erase 0x1000 (4K) 而非 0x10000 (64K), 
+由於 Winbond W25Q256JV SPI Flash 的一個 block 是 64K, 因此產生了嚴重的誤解. 所以之前常常出現 erase 1個 Block (0x10000) 之高位址內容無法被清掉的狀況. 現在已經修正完畢. 利用 Xmodem upgrade 
+"new APP" binary 已經完全成功寫入 SPI Flash 並通過 CRC校驗. 現在剩下 主程式跳轉到 SPI Flash  (0x9001_0000) 執行仍然失敗的問題. 問題應該在 APP 的那包 Code 的啟動地址設定. 修改 APP 這包 Code 
+的啟動地址設定, 現在已經可以成功跳轉到 APP-1. 
+
+
+######################################################################################################################################################
+
+20230825
+
+HELLO_FIRE_V2_EVK_LOADER_V8 (based on HELLO_FIRE_V2_EVK_LOADER_V7)
+
+1. SPI Flash 新增 read command [byte/halfword/word]
+2. 改寫 BSP_QSPI_Erase_Block 為 while, 一定等到 OK, 才繼續 Erase 下一個. 加了, 但還是無法預防 SPI-Flash erase 失敗的狀況, 原因不明.
+
+   將 
+   [A]
+   //#define HAL_QPSI_TIMEOUT_DEFAULT_VALUE ((uint32_t)5000)  /*  5 s */   由 5sec 改為 10sec 
+   #define HAL_QPSI_TIMEOUT_DEFAULT_VALUE ((uint32_t)10000)   /* 10 s */  
+   [B] 
+   //#define W25Q256JV_SUBSECTOR_ERASE_MAX_TIME     800    由 800 改為 1600
+   #define W25Q256JV_SUBSECTOR_ERASE_MAX_TIME    1600    
+
+   SPI-Flash erase 有時會 fail 的問題似乎已經解決.
+
+3. 新增 bootloader 跳轉APP等待時間可調整功能 (2~254 sec), 儲存於 SPI-Flash. 
+
+
+ 
+######################################################################################################################################################
+
+20230830
+
+HELLO_FIRE_V2_EVK_LOADER_V9 (based on HELLO_FIRE_V2_EVK_LOADER_V8)
+
+1. APP 改用 99-freeRTOS+emXGUI_5_7_inch, size 達 1030KB, 原來測試用的只有58KB. ps. 1顆 SPI-Flash 32MB
+2. 承1, 需修改 
+   [A] SDRAM 暫存 Xmodem 的區域大小                             .... done, 增大為 3MB
+   [B] FW_Upgrade 需要 erase SPI-Flash 的 Block 數量            .... done, 增大為 2MB
+   [C] 99-freeRTOS+emXGUI_5_7_inch 的啟動位置修改為 0x9001_0000 .... done, .... 仍不能開機, 顯示 Hardfault, 先跳過這個問題
+   [D] 修改擺放 APP-1 的區域大小
+
+      const IMAGE_POS_T ImagePosition[]=   
+      {
+	{LOADER_TYPE    ,		0  ,	FLH_LOADER_START       ,  FLH_LOADER_SIZE                             },   // 128KB for Bootloader
+	{HEADER_TYPE    ,		1  ,    DM_SPI_FLH_APP1_HEADER ,  0x40			                      },   //   64B for APP-1 header
+	{FIRMWARE_TYPE  , 		1  ,	DM_SPI_FLH_APP1_START  ,  DM_SPI_FLH_APP1_END-DM_SPI_FLH_APP1_START   },   //   2MB for APP-1
+	{NULL           ,		0  ,    0                      ,  0                                           }
+      };
+
+3. 將 W25Q256JV_SUBSECTOR_ERASE_MAX_TIME 再度增大為 2000.
+
+4. 加上可依據 APP大小, APP要存放的位置, 選擇要 erase 哪些 SPI-Flash 區段 ..... done
+
+
+######################################################################################################################################################
+
+20230906
+
+HELLO_FIRE_V2_EVK_LOADER_V10 (based on HELLO_FIRE_V2_EVK_LOADER_V9)
+
+0. Remove a lot of warnings
+
+1. Reboot後 
+   [A] 按下KEY2(SW3) 直接停在 LOADER MODE, LED 呈現黃色 
+   [B] 按下KEY1(SW1) 再按KEY2(SW3) 進入USB DFU(ps. device mode), LED 呈現青色(CYAN), 
+   [C] 都沒按呈現白色
+
+2. 使用 STM32H750XBH6 野火挑戰者V2開發板, 實現 USB Device Bootloader
+   (參考 C:\STM32\07_STM32H743I-EVAL [ST_EVB]\STM32Cube_FW_H7_V1.2.0\Projects\STM32H743I_EVAL\Applications\USB_Device\DFU_Standalone), 此範例程式在ST官方開發板上驗證確實可用
+   [1] stm32h7xx_hal_conf.h 內的 #define HAL_PCD_MODULE_ENABLED 需打開來, 否則 compile 有一堆 error
+   [2] OTG_HS_DM(PB14) / OTG_HS_DP(PB15) / OTG_ID(PB12)
+       在 usbd_conf.c (This file implements the USB Device library callbacks and MSP)
+       LL Driver Interface (USB Device Library --> PCD)
+
+   ps. 已釐清發現野火開發板的設計問題
+       [1] DFU Mode 要用 built-in bootloader, PA11, PA12 必須飛線 (PA12接J74的上面，PA11接J74的下面, 不能對換, 對換會 Fail) 
+
+
+   目前狀況        
+   [A, 使用 built-in bootloader,利用 bootstrap pin 切換  ] 如下方說明[跳線]後, 將BOOT0設定為High的硬體方式, 可以進入到DFU Mode, 使用 CubeProgrammer 連線成功
+   [B, 使用 built-in bootloader,利用 FW 切換             ] 如下方說明[跳線]後, 使用軟體跳到內建Bootloader地址(0x1FF09800), 可以進入到DFU Mode, 使用 CubeProgrammer 連線成功
+   [C, 自製 USB-DFU, 使用STM32Cube_FW_H7_V1.2.0 範例程式 ] 設置 [DN(PA11):DP(PA12)], 也可以進入到DFU Mode (USB Cable 重新插拔一次), 使用 CubeProgrammer 連線成功, 但連線速度較[A][B]慢, 
+                                                          按了"Connect" 後大約需要等 10 sec. 
+
+  $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ 
+  $$$$$$
+  $$$$$$ 重大發現, 使用[C], 搭配 CubeProgrammer  目前測試, 寫入 data到 MCU embedded flash 0x0802_0000 之後的位置是可以的
+  $$$$$$
+  $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ 
+
+
+######################################################################################################################################################
+
+20231016
+
+HELLO_FIRE_V2_EVK_LOADER_V11 (based on HELLO_FIRE_V2_EVK_LOADER_V10)
+
+1. 新增 "Do_SpiFlash_Update" command, 呼叫 "SPI_USBFW_Upgrade" function 
+ 
+2. 承目前狀況 C, 使用 CubeProgrammer 連線成功後, 使用 CubeProgrammer 透過 USB 將 DFU  data 先寫入 0x0802_0000, 然後再 copy 到 SPI Flash (手動已經成功)
+
+3. 承2, 設計自動化 (Done)
+
+  [A] SPI_USBFW_Upgrade(start, size) size 改由去 header 抓, start 訂為 0x0802_0000
+ 
+  [B] 用外部按鍵1鍵執行由 MCU Flash copy data 到 SPI flash 的動作 
+
+4. 承3, 目前確認隱藏的 MCU Flash 有(32-2)x64K= 1920K, CubeProgrammer從 Erase MCU Flash 到燒錄 MCU Flash 完畢約需要 42 sec,  Erase 大概要 21 sec.  
+
+   DN/DP datawidth 大約是24ns.
+
+
+#define LED_RED  
+#define LED_GREEN		
+#define LED_BLUE		
+#define LED_YELLOW	
+#define LED_PURPLE
+#define LED_CYAN 
+#define LED_WHITE	
+#define LED_RGBOFF	
+
+
+######################################################################################################################################################
+
+
+
+
+
+
+
+//////////////////////////////////////////////////
+ 
+ps. 使用 STM32H743XIH6U ST官方開發板  [DN(PA11):DP(PA12)]
+       [A] 將BOOT0設定為High的硬體方式, 可以進入到DFU Mode, 使用 CubeProgrammer 連線成功
+       [B] 使用軟體跳到內建Bootloader地址(0x1FF09800)的方式還沒試 
+       [C] 使用STM32Cube_FW_H7_V1.2.0 範例程式也可以進入到DFU Mode, 使用 CubeProgrammer 連線成功, 連線速度跟[A]一樣快
+
+//////////////////////////////////////////////////
+
+ps. 使用野火 STM32H750XBH6 挑戰者V2開發板
+       [A] USB_Use external FLASH to simulate U disk（W25Q256） 可以動, 電腦認的到 USB Device   
+
+//////////////////////////////////////////////////
+
+ps. 使用 Mina 範例程式, 使用 CubeIDE 產生 stldr
+
+
+
+
+
+
+
+
+
+######################################################################################################################################################
+######################################################################################################################################################
+######################################################################################################################################################
+
+20230720 
+
+HELLO_FIRE_V2_EVK_APP_V1 (based on HELLO_FIRE_V2_EVK_LOADER_V5)
+
+1. 首先製作APP範例, 用 HELLO_FIRE_V2_EVK_LOADER_V5 改成 HELLO_FIRE_V2_EVK_APP_V1, 程式從 0x9000_0000 啟動
+2. APP Image 放在 0x9000_0000L, Header 放在 0x91FE_0000L. 可以成功用 Xmodem 寫入這樣的設定
+3. 修改 APP 這包 Code 的啟動地址設定, 在 Keil 內將 0x90010000 的 Preprocessor Symbols 中 APPLICATION_ADDRESS 改為 0x90010000, 現在已經可以成功跳轉到 APP-1. 
+
+
+######################################################################################################################################################
+
+APP_99-freeRTOS+emXGUI_5_7_inch
+  
+
+
+
+
+
+
+
+
+
+
+
